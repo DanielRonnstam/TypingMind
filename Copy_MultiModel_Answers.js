@@ -1,13 +1,27 @@
-/* ===========================================================================
- * TypingMind Extension: "//c" — Copy last multi-model answers to clipboard
- * v2: correct answer count, real model titles, plain-text paste (no file).
- * ========================================================================= */
+/*!
+ * TypingMind Extension — Copy Multi-Model Answers ("//c")
+ * --------------------------------------------------------
+ * Type  //c  in the chat box (then Enter) after a multi-model reply to copy
+ * the prompt + every model's answer (with model titles, Markdown formatting)
+ * to the clipboard as plain text. Shows "n AI answers copied to clipboard."
+ *
+ * Install in TypingMind (Settings → Advanced → Extensions) via jsDelivr:
+ *   https://cdn.jsdelivr.net/gh/DanielRonnstam/TypingMind@main/Copy_MultiModel_Answers.js
+ *
+ * Author: Daniel Rönnstam
+ * License: MIT
+ */
 (function () {
   'use strict';
 
+  // Prevent double-initialisation if the script is injected more than once.
+  if (window.__tmCopyMultiModelLoaded) return;
+  window.__tmCopyMultiModelLoaded = true;
+
+  /* ----------------------------- CONFIG --------------------------------- */
   const CONFIG = {
     TRIGGER: '//c',
-    DEBUG: false, // set true and check console if titles/counts look wrong
+    DEBUG: false, // set true and check the browser console if titles/counts look wrong
 
     containerSelectors: [
       '[data-element-id="chat-space-middle-part"]',
@@ -17,18 +31,25 @@
     userMsgSelectors: ['[data-element-id="user-message"]'],
     aiMsgSelectors: ['[data-element-id="ai-response"]'],
     contentSelectors: ['[data-element-id="message-content"]', '.prose', '.markdown', ':scope'],
-    blockSelectors: ['[data-element-id="response-block"]'],
+    blockSelectors: [
+      '[data-element-id="response-block"]',
+      '[data-element-id="ai-response-block"]',
+      '[data-element-id="chat-message"]',
+    ],
     modelNameSelectors: [
       '[data-element-id="model-name"]',
       '[data-element-id="response-model"]',
       '[data-element-id="model-title"]',
+      '[data-element-id="ai-model-name"]',
+      '[data-element-id="message-model-name"]',
+      '[data-element-id="response-model-name"]',
       '[class*="model-name"]',
       '[class*="modelName"]',
+      '[class*="model-title"]',
     ],
   };
 
-  // Used as a last-resort heuristic to recognise a model label in text.
-  const MODEL_RE = /\b(gpt[\w.\- ]*|chatgpt|o\d[\w.\-]*|claude[\w.\- ]*|sonnet|opus|haiku|gemini[\w.\- ]*|bard|llama[\w.\- ]*|mistral[\w.\- ]*|mixtral|grok[\w.\-]*|deepseek[\w.\- ]*|qwen[\w.\- ]*|command[\w.\- ]*r?|perplexity|sonar|phi[\w.\-]*|gemma[\w.\-]*)\b/i;
+  const MODEL_RE = /\b(gpt[\w.\- ]*|chatgpt[\w.\- ]*|o[1-9]\d?[\w.\-]*|claude[\w.\- ]*|sonnet[\w.\- ]*|opus[\w.\- ]*|haiku[\w.\- ]*|gemini[\w.\- ]*|gemma[\w.\-]*|bard|palm[\w.\- ]*|llama[\w.\- ]*|mistral[\w.\- ]*|mixtral[\w.\- ]*|codestral[\w.\- ]*|grok[\w.\-]*|deepseek[\w.\- ]*|qwen[\w.\- ]*|command[\w.\- ]*r?[\w.\-]*|cohere[\w.\- ]*|perplexity[\w.\- ]*|sonar[\w.\- ]*|phi[\w.\-]*|nova[\w.\- ]*|yi[\w.\-]*|jamba[\w.\- ]*|reka[\w.\- ]*|titan[\w.\- ]*)\b/i;
 
   const log = (...a) => CONFIG.DEBUG && console.log('[//c]', ...a);
 
@@ -41,7 +62,6 @@
     }
     return null;
   }
-
   function queryAllOrdered(root, selectors) {
     const set = new Set();
     selectors.forEach((s) => root.querySelectorAll(s).forEach((e) => set.add(e)));
@@ -119,40 +139,65 @@
   const tidy = (s) => s.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
 
   /* --------------------- title (model name) detection ------------------- */
-  function findModelTitle(answerEl, index) {
-    // Climb to the wrapping block (so we can look at its header area).
-    let block = answerEl;
+  // Clean a raw model label: strip leading icons/avatars text, trailing
+  // separators, "·", token counts, timestamps, etc.
+  function cleanModelLabel(raw) {
+    if (!raw) return '';
+    let t = raw.replace(/\s+/g, ' ').trim();
+    // Cut off anything after a common separator that usually precedes metadata.
+    t = t.split(/[·•|]/)[0].trim();
+    // Drop trailing "copy"/"regenerate" style words that sometimes glue on.
+    t = t.replace(/\b(copy|regenerate|edit|share|retry)\b.*$/i, '').trim();
+    return t;
+  }
+
+  function getBlockFor(answerEl) {
     for (const s of CONFIG.blockSelectors) {
       const b = answerEl.closest(s);
-      if (b) { block = b; break; }
+      if (b) return b;
     }
-    if (block === answerEl && answerEl.parentElement) block = answerEl.parentElement;
+    return answerEl.parentElement || answerEl;
+  }
 
-    // 1) Explicit selectors
+  function findModelTitle(answerEl, index) {
+    const block = getBlockFor(answerEl);
+
+    // 1) Explicit, purpose-built selectors first.
     const explicit = firstMatch(block, CONFIG.modelNameSelectors);
     if (explicit && explicit.textContent.trim()) {
-      log('title via selector', explicit.textContent.trim());
-      return explicit.textContent.trim();
+      const cleaned = cleanModelLabel(explicit.textContent);
+      if (cleaned) return cleaned;
     }
 
-    // 2) title / aria-label attributes near the top of the block
-    const attrEls = block.querySelectorAll('[title],[aria-label],[alt]');
+    // 2) Attributes (title/aria-label/alt) that look like model names.
+    const attrEls = block.querySelectorAll('[title],[aria-label],[alt],[data-tooltip]');
     for (const el of attrEls) {
-      const v = (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim();
-      if (v && v.length <= 40 && MODEL_RE.test(v)) { log('title via attr', v); return v; }
+      const v = cleanModelLabel(
+        el.getAttribute('title') ||
+        el.getAttribute('aria-label') ||
+        el.getAttribute('alt') ||
+        el.getAttribute('data-tooltip') || ''
+      );
+      if (v && v.length <= 60 && MODEL_RE.test(v)) return v;
     }
 
-    // 3) Scan short text nodes for something that looks like a model name.
+    // 3) Scan leaf/short text nodes OUTSIDE the answer body for a model name.
+    //    Prefer the match that is closest (earliest) to the answer element.
     let best = null;
+    let bestScore = Infinity;
     block.querySelectorAll('*').forEach((el) => {
-      if (el.children.length) return;            // leaf elements only
-      if (answerEl.contains(el)) return;          // skip the answer body itself
-      const t = el.textContent.trim();
-      if (!t || t.length > 40) return;
-      if (MODEL_RE.test(t) && (!best || t.length < best.length)) best = t;
+      if (el.children.length) return;          // leaf nodes only
+      if (answerEl.contains(el)) return;       // ignore the answer text itself
+      const t = cleanModelLabel(el.textContent);
+      if (!t || t.length > 60) return;
+      if (!MODEL_RE.test(t)) return;
+      // Score: shorter labels and labels that match the regex more tightly win.
+      const score = t.length;
+      if (score < bestScore) { best = t; bestScore = score; }
     });
-    if (best) { log('title via text scan', best); return best; }
+    if (best) return best;
 
+    // 4) Fallback.
     return 'Model ' + (index + 1);
   }
 
@@ -160,31 +205,36 @@
   function collectLastTurn() {
     const container = firstMatch(document, CONFIG.containerSelectors) || document.body;
     const all = queryAllOrdered(container, [...CONFIG.userMsgSelectors, ...CONFIG.aiMsgSelectors]);
-    if (!all.length) { log('No messages found'); return null; }
+    if (!all.length) return null;
 
     const isUser = (el) => CONFIG.userMsgSelectors.some((s) => el.matches(s));
-
     let lastUserIdx = -1;
     all.forEach((el, i) => { if (isUser(el)) lastUserIdx = i; });
-    if (lastUserIdx === -1) { log('No user message'); return null; }
+    if (lastUserIdx === -1) return null;
 
     const promptEl = all[lastUserIdx];
     let answers = all.slice(lastUserIdx + 1).filter((el) => !isUser(el));
 
-    // --- de-duplication so the count is correct ---
-    // a) keep only the outermost answer elements (drop nested matches)
+    // Remove answers that are nested inside another captured answer.
     answers = answers.filter((el, _, arr) => !arr.some((o) => o !== el && o.contains(el)));
-    // b) drop empties (placeholders / loading shells)
+
+    // Require non-empty content.
     answers = answers.filter((el) => {
       const c = firstMatch(el, CONFIG.contentSelectors);
       return c && c.textContent.trim().length > 0;
     });
-    // c) drop exact duplicate texts
-    const seen = new Set();
+
+    // --- COUNT FIX -------------------------------------------------------
+    // Deduplicate by *response block* (one model = one block) instead of by
+    // text. Two different models can legitimately produce identical text, so
+    // text-based dedup undercounted them. Block-based dedup removes only true
+    // duplicate renders (e.g. the same response mirrored in another container)
+    // while keeping every distinct model answer.
+    const seenBlocks = new Set();
     answers = answers.filter((el) => {
-      const key = (firstMatch(el, CONFIG.contentSelectors)?.textContent || '').trim();
-      if (seen.has(key)) return false;
-      seen.add(key);
+      const block = getBlockFor(el);
+      if (seenBlocks.has(block)) return false;
+      seenBlocks.add(block);
       return true;
     });
 
@@ -196,27 +246,32 @@
   function buildOutput() {
     const turn = collectLastTurn();
     if (!turn) return null;
-
     const promptMd = tidy(htmlToMd(firstMatch(turn.promptEl, CONFIG.contentSelectors)));
     const parts = ['**Prompt:**\n\n' + promptMd + '\n\n---\n'];
 
+    // Track used titles so duplicate model names get a #2, #3 … suffix and
+    // each AI is still clearly distinguished in the output.
+    const titleCounts = {};
     turn.answerEls.forEach((el, i) => {
-      const title = findModelTitle(el, i);
+      let title = findModelTitle(el, i);
+      if (titleCounts[title]) {
+        titleCounts[title] += 1;
+        title = title + ' #' + titleCounts[title];
+      } else {
+        titleCounts[title] = 1;
+      }
       const md = tidy(htmlToMd(firstMatch(el, CONFIG.contentSelectors)));
       parts.push('## ' + title + '\n\n' + md + '\n\n---\n');
     });
-
     return { text: tidy(parts.join('\n')), count: turn.answerEls.length };
   }
 
   /* ---------------------------- clipboard (plain text only) ------------- */
   async function copyToClipboard(text) {
-    // Plain text ONLY — writing text/html makes some chat inputs paste a file.
     try {
       await navigator.clipboard.writeText(text);
       return true;
     } catch (e) {
-      // Fallback for restricted contexts
       try {
         const ta = document.createElement('textarea');
         ta.value = text;
@@ -272,18 +327,26 @@
     else toast('Copy failed — check clipboard permissions.', false);
   }
 
-  document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.isComposing) return;
-    const t = e.target;
-    if (!t) return;
-    const isText = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT';
-    if (!isText && !t.isContentEditable) return;
-    const val = (isText ? t.value : t.innerText).trim();
-    if (val !== CONFIG.TRIGGER) return;
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-    clearInput(t);
-    run();
-  }, true);
+  /* --------------------------- init ------------------------------------- */
+  function init() {
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.isComposing) return;
+      const t = e.target;
+      if (!t) return;
+      const isText = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT';
+      if (!isText && !t.isContentEditable) return;
+      const val = (isText ? t.value : t.innerText).trim();
+      if (val !== CONFIG.TRIGGER) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      clearInput(t);
+      run();
+    }, true);
+    log('Copy Multi-Model Answers extension loaded.');
+  }
 
-  log('Extension v2 loaded.');
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
 })();
