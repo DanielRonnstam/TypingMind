@@ -1,7 +1,7 @@
 /*!
  * TypingMind Extension — Copy Multi-Model Answers ("//c")
  * --------------------------------------------------------
- * Type  //c  in the chat box (then Enter) after a multi-model reply to copy
+ * Type  !!!c  in the chat box (then Enter) after a multi-model reply to copy
  * the prompt + every model's answer (with model titles, Markdown formatting)
  * to the clipboard as plain text. Shows "n AI answers copied to clipboard."
  *
@@ -16,7 +16,7 @@
 
   /* ----------------------------- CONFIG --------------------------------- */
   const CONFIG = {
-    TRIGGER: '//c',
+    TRIGGER: '!!!c',
     DEBUG: false, // set true to log title/count detection in the console
 
     containerSelectors: [
