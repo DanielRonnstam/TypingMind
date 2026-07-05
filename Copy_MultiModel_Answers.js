@@ -1,60 +1,33 @@
 /* ===========================================================================
- * TypingMind Extension: "!!!c" — Copy last multi-model answers to clipboard
- * v3: fires as soon as "!!!c" is typed (Enter no longer required, but still
- * works as a fallback), and merges every chunk belonging to one model into
- * a single full answer, even if the UI rendered it as several pieces.
+ * TypingMind Extension — Copy Multi-Model Answers (button version, v4)
+ * ---------------------------------------------------------------------------
+ * Adds a small floating copy-icon button (bottom-right of the screen).
+ * Click it to copy the LAST multi-model turn — the prompt plus every
+ * model's FULL answer (even if a model's reply was rendered as several
+ * chunks, they're merged into one) — to the clipboard as plain text, with
+ * clear separators between models. Shows a toast with how many models'
+ * answers were copied.
+ *
+ * WHY THIS VERSION IS DIFFERENT FROM THE PREVIOUS ONE:
+ * TypingMind doesn't publish its internal DOM structure. Instead of
+ * hardcoding exact `data-element-id` strings (which turned out to be wrong
+ * last time and caused a silent failure), this script scans ALL
+ * data-element-id attributes on the page and pattern-matches ones that
+ * look like user/AI messages. If it still can't find them, clicking the
+ * button copies a short diagnostic report instead of doing nothing — paste
+ * that back so the selectors can be corrected precisely.
+ *
+ * Author: Daniel Rönnstam
+ * License: MIT
  * ========================================================================= */
 (function () {
   'use strict';
+  if (window.__tmCopyMultiModelBtnLoaded) return;
+  window.__tmCopyMultiModelBtnLoaded = true;
 
-  if (window.__tmCopyMultiModelLoaded) return;
-  window.__tmCopyMultiModelLoaded = true;
+  console.log('[TM Copy Button] Extension script loaded. Look for a blue round button, bottom-right of the screen.');
 
-  /* ----------------------------- CONFIG --------------------------------- */
-  const CONFIG = {
-    TRIGGER: '!!!c',
-    DEBUG: false, // set true and check console if titles/counts look wrong
-
-    containerSelectors: [
-      '[data-element-id="chat-space-middle-part"]',
-      '[data-element-id="chat-space-end-part"]',
-      'main',
-    ],
-    userMsgSelectors: ['[data-element-id="user-message"]'],
-    aiMsgSelectors: ['[data-element-id="ai-response"]'],
-    contentSelectors: ['[data-element-id="message-content"]', '.prose', '.markdown'],
-    blockSelectors: ['[data-element-id="response-block"]'],
-    modelNameSelectors: [
-      '[data-element-id="model-name"]',
-      '[data-element-id="response-model"]',
-      '[data-element-id="model-title"]',
-      '[class*="model-name"]',
-      '[class*="modelName"]',
-    ],
-  };
-
-  // Used as a last-resort heuristic to recognise a model label in text.
-  const MODEL_RE = /\b(gpt[\w.\- ]*|chatgpt|o\d[\w.\-]*|claude[\w.\- ]*|sonnet|opus|haiku|gemini[\w.\- ]*|bard|llama[\w.\- ]*|mistral[\w.\- ]*|mixtral|grok[\w.\-]*|deepseek[\w.\- ]*|qwen[\w.\- ]*|command[\w.\- ]*r?|perplexity|sonar|phi[\w.\-]*|gemma[\w.\-]*)\b/i;
-
-  const log = (...a) => CONFIG.DEBUG && console.log('[!!!c]', ...a);
-
-  function firstMatch(root, selectors) {
-    for (const s of selectors) {
-      try {
-        const el = root.querySelector(s);
-        if (el) return el;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  function queryAllOrdered(root, selectors) {
-    const set = new Set();
-    selectors.forEach((s) => root.querySelectorAll(s).forEach((e) => set.add(e)));
-    return [...set].sort((a, b) =>
-      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
-    );
-  }
+  const CONTENT_SELECTORS = ['[data-element-id="message-content"]', '.prose', '.markdown'];
 
   /* --------------------- HTML -> Markdown converter --------------------- */
   function htmlToMd(node) {
@@ -125,86 +98,75 @@
   const tidy = (s) => s.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
 
   /* ---------------- full-text extraction (handles split chunks) --------- */
-  // Grabs EVERY content node inside an answer block (not just the first
-  // match), so a model's answer that got rendered as several separate
-  // message-content/prose chunks is still captured in full, in order.
   function extractFullText(el) {
     let nodes = [];
-    CONFIG.contentSelectors.forEach((s) => {
-      el.querySelectorAll(s).forEach((n) => nodes.push(n));
-    });
-    // Keep only outermost matches (drop nested duplicates, e.g. .prose
-    // inside message-content).
+    CONTENT_SELECTORS.forEach((s) => el.querySelectorAll(s).forEach((n) => nodes.push(n)));
     nodes = nodes.filter((n, _, arr) => !arr.some((o) => o !== n && o.contains(n)));
     if (!nodes.length) nodes = [el];
-    nodes.sort((a, b) =>
-      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
-    );
-    return nodes
-      .map((n) => tidy(htmlToMd(n)))
-      .filter(Boolean)
-      .join('\n\n');
+    nodes.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    return nodes.map((n) => tidy(htmlToMd(n))).filter(Boolean).join('\n\n');
   }
 
-  /* --------------------- title (model name) detection ------------------- */
+  /* ------------- adaptive message discovery (pattern, not hardcoded) ---- */
+  function getTaggedElements() {
+    return [...document.querySelectorAll('[data-element-id]')];
+  }
+
+  function findMessageElements() {
+    const tagged = getTaggedElements();
+    const idOf = (el) => el.getAttribute('data-element-id') || '';
+    const userEls = tagged.filter((el) => /user.*message|message.*user|human.*message|user.?turn/i.test(idOf(el)));
+    const aiEls = tagged.filter((el) => /ai.*response|assistant.*message|response.*message|ai.?message|bot.?message|model.*response|response.*block/i.test(idOf(el)));
+    return { userEls, aiEls, taggedCount: tagged.length };
+  }
+
+  const MODEL_RE = /\b(gpt[\w.\- ]*|chatgpt|o\d[\w.\-]*|claude[\w.\- ]*|sonnet|opus|haiku|gemini[\w.\- ]*|bard|llama[\w.\- ]*|mistral[\w.\- ]*|mixtral|grok[\w.\-]*|deepseek[\w.\- ]*|qwen[\w.\- ]*|command[\w.\- ]*r?|perplexity|sonar|phi[\w.\-]*|gemma[\w.\-]*)\b/i;
+
   function findModelTitle(answerEl, index) {
-    // Climb to the wrapping block (so we can look at its header area).
-    let block = answerEl;
-    for (const s of CONFIG.blockSelectors) {
-      const b = answerEl.closest(s);
-      if (b) { block = b; break; }
+    let block = answerEl.closest('[data-element-id]') || answerEl.parentElement || answerEl;
+    const near = getTaggedElements().filter((el) => block.contains(el) || el.contains(block));
+    for (const el of near) {
+      if (/model.*name|model.*title|model.*label/i.test(el.getAttribute('data-element-id') || '')) {
+        const t = el.textContent.trim();
+        if (t) return t;
+      }
     }
-    if (block === answerEl && answerEl.parentElement) block = answerEl.parentElement;
-
-    // 1) Explicit selectors
-    const explicit = firstMatch(block, CONFIG.modelNameSelectors);
-    if (explicit && explicit.textContent.trim()) {
-      log('title via selector', explicit.textContent.trim());
-      return explicit.textContent.trim();
-    }
-
-    // 2) title / aria-label attributes near the top of the block
     const attrEls = block.querySelectorAll('[title],[aria-label],[alt]');
     for (const el of attrEls) {
       const v = (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim();
-      if (v && v.length <= 40 && MODEL_RE.test(v)) { log('title via attr', v); return v; }
+      if (v && v.length <= 40 && MODEL_RE.test(v)) return v;
     }
-
-    // 3) Scan short text nodes for something that looks like a model name.
     let best = null;
     block.querySelectorAll('*').forEach((el) => {
-      if (el.children.length) return;            // leaf elements only
-      if (answerEl.contains(el)) return;          // skip the answer body itself
+      if (el.children.length) return;
+      if (answerEl.contains(el)) return;
       const t = el.textContent.trim();
       if (!t || t.length > 40) return;
       if (MODEL_RE.test(t) && (!best || t.length < best.length)) best = t;
     });
-    if (best) { log('title via text scan', best); return best; }
-
-    return 'Model ' + (index + 1);
+    return best || 'Model ' + (index + 1);
   }
 
-  /* ------------------- locate the last multi-model turn ----------------- */
+  /* --------------------------- turn collection --------------------------- */
   function collectLastTurn() {
-    const container = firstMatch(document, CONFIG.containerSelectors) || document.body;
-    const all = queryAllOrdered(container, [...CONFIG.userMsgSelectors, ...CONFIG.aiMsgSelectors]);
-    if (!all.length) { log('No messages found'); return null; }
+    const { userEls, aiEls, taggedCount } = findMessageElements();
+    if (!userEls.length || !aiEls.length) {
+      return { ok: false, taggedCount, userCount: userEls.length, aiCount: aiEls.length };
+    }
 
-    const isUser = (el) => CONFIG.userMsgSelectors.some((s) => el.matches(s));
-
+    const all = [...userEls, ...aiEls].sort((a, b) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+    );
+    const userSet = new Set(userEls);
     let lastUserIdx = -1;
-    all.forEach((el, i) => { if (isUser(el)) lastUserIdx = i; });
-    if (lastUserIdx === -1) { log('No user message'); return null; }
+    all.forEach((el, i) => { if (userSet.has(el)) lastUserIdx = i; });
+    if (lastUserIdx === -1) return { ok: false, taggedCount, userCount: userEls.length, aiCount: aiEls.length };
 
     const promptEl = all[lastUserIdx];
-    let answers = all.slice(lastUserIdx + 1).filter((el) => !isUser(el));
+    let answers = all.slice(lastUserIdx + 1).filter((el) => !userSet.has(el));
 
-    // --- de-duplication so the count is correct ---
-    // a) keep only the outermost answer elements (drop nested matches)
     answers = answers.filter((el, _, arr) => !arr.some((o) => o !== el && o.contains(el)));
-    // b) drop empties (placeholders / loading shells)
     answers = answers.filter((el) => extractFullText(el).length > 0);
-    // c) drop exact duplicate texts
     const seen = new Set();
     answers = answers.filter((el) => {
       const key = extractFullText(el);
@@ -212,50 +174,55 @@
       seen.add(key);
       return true;
     });
+    if (!answers.length) return { ok: false, taggedCount, userCount: userEls.length, aiCount: aiEls.length };
 
-    log('answer chunks found:', answers.length);
-    if (!answers.length) return null;
-
-    // --- group consecutive chunks that belong to the same model, so a
-    // single model's output that was rendered as multiple pieces is
-    // treated (and copied) as ONE full answer. ---
     const groups = [];
     answers.forEach((el, i) => {
       const title = findModelTitle(el, i);
       const last = groups[groups.length - 1];
-      if (last && last.title === title) {
-        last.els.push(el);
-      } else {
-        groups.push({ title, els: [el] });
-      }
+      if (last && last.title === title) last.els.push(el);
+      else groups.push({ title, els: [el] });
     });
 
-    return { promptEl, groups };
+    return { ok: true, promptEl, groups };
   }
 
   function buildOutput() {
     const turn = collectLastTurn();
-    if (!turn) return null;
+    if (!turn.ok) return { ok: false, diag: turn };
 
-    const promptMd = tidy(htmlToMd(firstMatch(turn.promptEl, CONFIG.contentSelectors) || turn.promptEl));
-    const parts = ['**Prompt:**\n\n' + promptMd + '\n\n---\n'];
+    const promptEl = turn.promptEl.querySelector(CONTENT_SELECTORS.join(',')) || turn.promptEl;
+    const promptMd = tidy(htmlToMd(promptEl));
 
+    const SEP = '='.repeat(60);
+    const parts = [`PROMPT:\n\n${promptMd}`];
     turn.groups.forEach((g) => {
       const md = tidy(g.els.map((el) => extractFullText(el)).filter(Boolean).join('\n\n'));
-      parts.push('## ' + g.title + '\n\n' + md + '\n\n---\n');
+      parts.push(`${SEP}\nMODEL: ${g.title}\n${SEP}\n\n${md}`);
     });
 
-    return { text: tidy(parts.join('\n')), count: turn.groups.length };
+    return { ok: true, text: parts.join('\n\n'), count: turn.groups.length };
   }
 
-  /* ---------------------------- clipboard (plain text only) ------------- */
+  /* ----------------------------- diagnostics ----------------------------- */
+  function buildDiagnosticReport(diag) {
+    const ids = [...new Set(getTaggedElements().map((el) => el.getAttribute('data-element-id')))].sort();
+    return [
+      'TypingMind Copy-Extension diagnostic report — paste this to Claude so the selectors can be fixed.',
+      '',
+      `Total elements with a data-element-id on this page: ${diag.taggedCount}`,
+      `Matched as "user message": ${diag.userCount}`,
+      `Matched as "AI response": ${diag.aiCount}`,
+      '',
+      'All unique data-element-id values currently on the page:',
+      ...ids.map((id) => '  - ' + id),
+    ].join('\n');
+  }
+
+  /* ------------------------------ clipboard ------------------------------ */
   async function copyToClipboard(text) {
-    // Plain text ONLY — writing text/html makes some chat inputs paste a file.
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (e) {
-      // Fallback for restricted contexts
+    try { await navigator.clipboard.writeText(text); return true; }
+    catch (e) {
       try {
         const ta = document.createElement('textarea');
         ta.value = text;
@@ -265,90 +232,82 @@
         const ok = document.execCommand('copy');
         ta.remove();
         return ok;
-      } catch (e2) { log('clipboard failed', e2); return false; }
+      } catch (e2) { return false; }
     }
   }
 
-  /* ----------------------------- toast ---------------------------------- */
-  function toast(msg, ok = true) {
+  /* -------------------------------- toast -------------------------------- */
+  function toast(msg, ok = true, duration = 2400) {
     let el = document.getElementById('tm-copyc-toast');
     if (!el) {
       el = document.createElement('div');
       el.id = 'tm-copyc-toast';
       el.style.cssText =
         'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
-        'padding:10px 18px;border-radius:8px;font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;' +
-        'color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;pointer-events:none;';
+        'max-width:80vw;padding:10px 18px;border-radius:8px;font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;' +
+        'color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;pointer-events:none;text-align:center;';
       document.body.appendChild(el);
     }
     el.style.background = ok ? '#16a34a' : '#dc2626';
     el.textContent = msg;
     requestAnimationFrame(() => (el.style.opacity = '1'));
     clearTimeout(el._t);
-    el._t = setTimeout(() => (el.style.opacity = '0'), 2200);
+    el._t = setTimeout(() => (el.style.opacity = '0'), duration);
   }
 
-  /* --------------------------- input clearing --------------------------- */
-  function clearInput(el) {
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      const proto = el.tagName === 'TEXTAREA'
-        ? window.HTMLTextAreaElement.prototype
-        : window.HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, '');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else if (el.isContentEditable) {
-      el.innerText = '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+  /* -------------------------------- click --------------------------------- */
+  async function handleClick() {
+    const out = buildOutput();
+    if (out.ok) {
+      const copied = await copyToClipboard(out.text);
+      toast(
+        copied
+          ? `${out.count} AI answer${out.count === 1 ? '' : 's'} copied to clipboard.`
+          : 'Copy failed — check clipboard permissions.',
+        copied
+      );
+    } else {
+      const report = buildDiagnosticReport(out.diag);
+      const copied = await copyToClipboard(report);
+      toast(
+        copied
+          ? 'Could not detect chat messages — copied diagnostic info instead. Paste it to Claude.'
+          : 'Could not detect messages, and clipboard copy failed too.',
+        false,
+        4200
+      );
+      console.log('[TM Copy Button] Diagnostic report:\n' + report);
     }
   }
 
-  /* ----------------------------- run ------------------------------------ */
-  let running = false; // guard against double-fire (input event + Enter fallback)
-
-  async function run(triggerEl) {
-    if (running) return;
-    running = true;
-    try {
-      clearInput(triggerEl);
-      const out = buildOutput();
-      if (!out) { toast('No multi-model answer found.', false); return; }
-      const ok = await copyToClipboard(out.text);
-      if (ok) toast(out.count + ' AI answer' + (out.count === 1 ? '' : 's') + ' copied to clipboard.');
-      else toast('Copy failed — check clipboard permissions.', false);
-    } finally {
-      // small delay so the Enter keydown fired by the same trigger action
-      // (if any) doesn't re-run this before the input is confirmed cleared
-      setTimeout(() => { running = false; }, 150);
-    }
+  /* ------------------------------ the button ------------------------------ */
+  function createButton() {
+    if (document.getElementById('tm-copy-multimodel-btn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'tm-copy-multimodel-btn';
+    btn.type = 'button';
+    btn.title = 'Copy all model answers';
+    btn.innerHTML =
+      '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+      'stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/>' +
+      '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    btn.style.cssText =
+      'position:fixed; right:20px; bottom:100px; z-index:2147483000;' +
+      'width:44px; height:44px; border-radius:50%; border:none;' +
+      'background:#2563eb; color:#fff; display:flex; align-items:center; justify-content:center;' +
+      'box-shadow:0 4px 14px rgba(0,0,0,.3); cursor:pointer; transition:transform .15s ease;';
+    btn.addEventListener('mouseenter', () => (btn.style.transform = 'scale(1.08)'));
+    btn.addEventListener('mouseleave', () => (btn.style.transform = 'scale(1)'));
+    btn.addEventListener('click', handleClick);
+    document.body.appendChild(btn);
   }
 
-  function getVal(t) {
-    const isText = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT';
-    return (isText ? t.value : t.innerText || '').trim();
+  function ensureButtonPersists() {
+    createButton();
+    const obs = new MutationObserver(() => { if (!document.getElementById('tm-copy-multimodel-btn')) createButton(); });
+    obs.observe(document.body, { childList: true, subtree: true });
   }
 
-  // --- Primary path: fire as soon as "!!!c" has been typed, no Enter needed.
-  document.addEventListener('input', function (e) {
-    const t = e.target;
-    if (!t) return;
-    const isText = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT';
-    if (!isText && !t.isContentEditable) return;
-    if (getVal(t) !== CONFIG.TRIGGER) return;
-    run(t);
-  }, true);
-
-  // --- Fallback path: in case an editor doesn't fire a normal 'input' event
-  // (e.g. some rich-text editors), still catch it on Enter as before.
-  document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.isComposing) return;
-    const t = e.target;
-    if (!t) return;
-    const isText = t.tagName === 'TEXTAREA' || t.tagName === 'INPUT';
-    if (!isText && !t.isContentEditable) return;
-    if (getVal(t) !== CONFIG.TRIGGER) return;
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-    run(t);
-  }, true);
-
-  log('Extension v3 loaded (trigger: ' + CONFIG.TRIGGER + ').');
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ensureButtonPersists);
+  else ensureButtonPersists();
 })();
